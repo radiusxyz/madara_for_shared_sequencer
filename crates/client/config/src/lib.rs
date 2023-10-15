@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs;
+use std::{env, fs};
 
 use config::{Config, Environment, File};
 use lazy_static::lazy_static;
@@ -20,12 +20,9 @@ impl Default for DaConfig {
         DaConfig {
             sequencer_private_key: "0x00c1cf1490de1352865301bb8705143f3ef938f97fdf892f1090dcb5ac7bcd1d".to_string(),
             is_validating: false,
-            host: "http://localhost:26658".to_string(),
-            namespace: "AAAAAAAAAAAAAAAAAAAAAAAAAAECAwQFBgcICRA=".to_string(),
-            auth_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
-                         eyJBbGxvdyI6WyJwdWJsaWMiLCJyZWFkIiwid3JpdGUiLCJhZG1pbiJdfQ.\
-                         R25jC3ptCU5PQfvpRUJSME6k0RSP6h97NDq44oAndSs"
-                .to_string(),
+            host: "".to_string(),
+            namespace: "".to_string(),
+            auth_token: "".to_string(),
         }
     }
 }
@@ -41,13 +38,38 @@ fn file_exists(filename: &str) -> bool {
 
 lazy_static! {
     pub static ref DA_CONFIG: HashMap<String, String> = {
-        if !file_exists("Config.toml") {
+
+    let args: Vec<String> = env::args().collect();
+    let mut base_path:String=".".to_string() ;
+    // The first argument (at index 0) is the name of the program itself.
+    // The actual command-line arguments start from index 1.
+    if args.len() > 1 {
+        println!("Command-line arguments:");
+        for (index, arg) in args.iter().enumerate().skip(1) {
+            if arg=="--base-path" && index+1<args.len() {
+            base_path = Some(args[index + 1].clone()).unwrap();
+            println!("Arg {}", base_path);
+            }
+        }
+    } else {
+        println!("No command-line arguments provided.");
+    }
+    let file_path = format!("{}/chains/dev/configs/Config.toml", base_path);
+
+        if let Some(parent_dir) = file_path.rfind('/') {
+        if let Err(e) = fs::create_dir_all(&file_path[0..parent_dir]) {
+            eprintln!("Failed to create directory: {:?}", e);
+        }
+        }
+
+
+        if !file_exists(&file_path) {
             // Config file doesn't exist, create it with default values
             let config = DaConfig::default();
-            save_config(&config, "Config.toml");
+            save_config(&config, &file_path);
         }
         let config = Config::builder()
-            .add_source(File::with_name("Config.toml"))
+            .add_source(File::with_name(&file_path))
             .add_source(Environment::with_prefix("da"))
             .build()
             .unwrap();
