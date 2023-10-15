@@ -185,11 +185,15 @@ pub fn run() -> sc_cli::Result<()> {
         }
         None => {
             // when using the --dev flag, every future config should be ignored
+            println!("entered");
             if !cli.run.run_cmd.shared_params.dev {
                 let madara_path = if cli.run.madara_path.is_some() {
+                    println!("THIS IS COMMAND RS_____-----_____-----_____ IFIFIFIFIF");
                     cli.run.madara_path.clone().unwrap().to_str().unwrap().to_string()
                 } else {
+                    println!("THIS IS COMMAND RS_____-----_____-----_____ ELSEELSEELSEELSE");
                     let home_path = std::env::var("HOME").unwrap_or(std::env::var("USERPROFILE").unwrap_or(".".into()));
+                    println!("home_path: {}", home_path);
                     format!("{}/.madara", home_path)
                 };
 
