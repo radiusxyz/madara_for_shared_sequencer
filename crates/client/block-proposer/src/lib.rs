@@ -17,7 +17,9 @@ use mc_rpc::submit_extrinsic_with_order;
 use mc_transaction_pool::decryptor::Decryptor;
 use mc_transaction_pool::EncryptedTransactionPool;
 use mp_starknet::execution::types::Felt252Wrapper;
-use mp_starknet::transaction::types::{EncryptedInvokeTransaction, InvokeTransaction, Transaction as MPTransaction, TxType};
+use mp_starknet::transaction::types::{
+    EncryptedInvokeTransaction, InvokeTransaction, Transaction as MPTransaction, TxType,
+};
 use pallet_starknet::runtime_api::{ConvertTransactionRuntimeApi, StarknetRuntimeApi};
 use prometheus_endpoint::Registry as PrometheusRegistry;
 use sc_block_builder::{BlockBuilderApi, BlockBuilderProvider};
@@ -495,8 +497,6 @@ where
                         // tokio::task::spawn(
                         async move {
                             tokio::time::sleep(Duration::from_secs(1)).await;
-
-                            println!("stompesi - start delay function block_height {} order {}", block_height, order);
 
                             let encrypted_invoke_transaction: EncryptedInvokeTransaction;
                             {

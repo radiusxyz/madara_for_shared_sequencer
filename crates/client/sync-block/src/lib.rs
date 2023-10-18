@@ -6,7 +6,7 @@ use base64::Engine as _;
 use hyper::header::HeaderValue;
 use hyper::{body, Body, Client, Request, StatusCode};
 use lazy_static::lazy_static;
-use mc_config::DA_CONFIG;
+use mc_config::config_map;
 use rocksdb::{Error, IteratorMode, DB};
 use serde_json::{json, Value};
 use tokio;
@@ -144,9 +144,10 @@ fn encode_data_to_base64(original: String) -> String {
 }
 
 async fn submit_to_da(data: String) -> Result<String, Box<dyn std::error::Error>> {
-    let da_host = DA_CONFIG.get("host").unwrap();
-    let da_namespace = DA_CONFIG.get("namespace").unwrap();
-    let da_auth_token = DA_CONFIG.get("auth_token").unwrap();
+    let config_map = config_map();
+    let da_host = config_map.get("host").unwrap();
+    let da_namespace = config_map.get("namespace").unwrap();
+    let da_auth_token = config_map.get("auth_token").unwrap();
     let da_auth = format!("Bearer {}", da_auth_token);
 
     let encoded_data = encode_data_to_base64(data);
@@ -194,9 +195,10 @@ async fn submit_to_da(data: String) -> Result<String, Box<dyn std::error::Error>
 }
 
 async fn retrieve_from_da(data: String) -> Result<String, Box<dyn std::error::Error>> {
-    let da_host = DA_CONFIG.get("host").unwrap();
-    let da_namespace = DA_CONFIG.get("namespace").unwrap();
-    let da_auth_token = DA_CONFIG.get("auth_token").unwrap();
+    let config_map = config_map();
+    let da_host = config_map.get("host").unwrap();
+    let da_namespace = config_map.get("namespace").unwrap();
+    let da_auth_token = config_map.get("auth_token").unwrap();
     let da_auth = format!("Bearer {}", da_auth_token);
 
     let block_height: u64 = data.parse().unwrap();

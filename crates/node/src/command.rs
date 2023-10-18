@@ -1,5 +1,6 @@
 use frame_benchmarking_cli::{BenchmarkCmd, ExtrinsicFactory, SUBSTRATE_REFERENCE_HARDWARE};
 use madara_runtime::Block;
+use mc_config::ConfigMap;
 use sc_cli::{ChainSpec, RpcMethods, RuntimeVersion, SubstrateCli};
 
 use crate::benchmarking::{inherent_benchmark_data, RemarkBuilder};
@@ -185,18 +186,18 @@ pub fn run() -> sc_cli::Result<()> {
         }
         None => {
             // when using the --dev flag, every future config should be ignored
-            println!("entered");
-            if !cli.run.run_cmd.shared_params.dev {
-                let madara_path = if cli.run.madara_path.is_some() {
-                    println!("THIS IS COMMAND RS_____-----_____-----_____ IFIFIFIFIF");
-                    cli.run.madara_path.clone().unwrap().to_str().unwrap().to_string()
-                } else {
-                    println!("THIS IS COMMAND RS_____-----_____-----_____ ELSEELSEELSEELSE");
-                    let home_path = std::env::var("HOME").unwrap_or(std::env::var("USERPROFILE").unwrap_or(".".into()));
-                    println!("home_path: {}", home_path);
-                    format!("{}/.madara", home_path)
-                };
+            let madara_path = if cli.run.madara_path.is_some() {
+                cli.run.madara_path.clone().unwrap().to_str().unwrap().to_string()
+            } else {
+                println!("THIS IS COMMAND RS_____-----_____-----_____ ELSEELSEELSEELSE");
+                let home_path = std::env::var("HOME").unwrap_or(std::env::var("USERPROFILE").unwrap_or(".".into()));
+                println!("home_path: {}", home_path);
+                format!("{}/.madara", home_path)
+            };
 
+            ConfigMap::init(&madara_path);
+
+            if !cli.run.run_cmd.shared_params.dev {
                 cli.run.run_cmd.network_params.node_key_params.node_key_file =
                     Some((madara_path.clone() + "/p2p-key.ed25519").into());
                 cli.run.run_cmd.shared_params.base_path = Some((madara_path.clone()).into());

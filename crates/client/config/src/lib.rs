@@ -1,10 +1,79 @@
 use std::collections::HashMap;
-use std::{env, fs};
+use std::fs;
+use std::mem::MaybeUninit;
+use std::sync::{Mutex, Once};
 
 use config::{Config, Environment, File};
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use toml;
+
+pub static mut CONFIG: MaybeUninit<ConfigMap> = MaybeUninit::uninit();
+static INIT: Once = Once::new();
+
+pub fn config_map() -> &'static ConfigMap {
+    if INIT.is_completed() {
+        unsafe { CONFIG.assume_init_ref() }
+    } else {
+        panic!("ConfigMap is not initialized..");
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ConfigMap {
+    inner: Mutex<HashMap<String, String>>,
+}
+
+impl Default for ConfigMap {
+    fn default() -> Self {
+        Self { inner: Mutex::new(HashMap::default()) }
+    }
+}
+
+impl ConfigMap {
+    pub fn init(path: &String) {
+        let file_path = format!("{}/Config.toml", path);
+
+        if let Some(parent_dir) = file_path.rfind('/') {
+            if let Err(e) = fs::create_dir_all(&file_path[0..parent_dir]) {
+                eprintln!("Failed to create directory: {:?}", e);
+            }
+        }
+
+        if !file_exists(&file_path) {
+            // Config file doesn't exist, create it with default values
+            let config = DaConfig::default();
+            save_config(&config, &file_path);
+        }
+
+        let config = Config::builder()
+            .add_source(File::with_name(&file_path))
+            .add_source(Environment::with_prefix("da"))
+            .build()
+            .unwrap();
+
+        let config: HashMap<String, String> = config.try_deserialize::<HashMap<String, String>>().unwrap();
+
+        unsafe {
+            INIT.call_once(|| {
+                let config_map = ConfigMap::default();
+                config.iter().for_each(|(key, value)| {
+                    config_map.insert(key, value);
+                });
+                CONFIG.write(config_map);
+            });
+        }
+    }
+
+    pub fn get(&self, key: impl AsRef<str>) -> Option<String> {
+        let map_guard = self.inner.lock().unwrap();
+        map_guard.get(key.as_ref()).cloned()
+    }
+
+    pub fn insert(&self, key: impl ToString, value: impl ToString) {
+        let mut map_guard = self.inner.lock().unwrap();
+        map_guard.insert(key.to_string(), value.to_string());
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct DaConfig {
@@ -34,48 +103,4 @@ fn save_config<T: Serialize>(config: &T, filename: &str) {
 
 fn file_exists(filename: &str) -> bool {
     fs::metadata(filename).is_ok()
-}
-
-lazy_static! {
-    pub static ref DA_CONFIG: HashMap<String, String> = {
-
-    let args: Vec<String> = env::args().collect();
-    let mut base_path:String=".".to_string() ;
-    // The first argument (at index 0) is the name of the program itself.
-    // The actual command-line arguments start from index 1.
-    if args.len() > 1 {
-        println!("Command-line arguments:");
-        for (index, arg) in args.iter().enumerate().skip(1) {
-            if arg=="--base-path" && index+1<args.len() {
-            base_path = Some(args[index + 1].clone()).unwrap();
-            println!("Arg {}", base_path);
-            }
-        }
-    } else {
-        println!("No command-line arguments provided.");
-    }
-    let file_path = format!("{}/chains/dev/configs/Config.toml", base_path);
-
-        if let Some(parent_dir) = file_path.rfind('/') {
-        if let Err(e) = fs::create_dir_all(&file_path[0..parent_dir]) {
-            eprintln!("Failed to create directory: {:?}", e);
-        }
-        }
-
-
-        if !file_exists(&file_path) {
-            // Config file doesn't exist, create it with default values
-            let config = DaConfig::default();
-            save_config(&config, &file_path);
-        }
-        let config = Config::builder()
-            .add_source(File::with_name(&file_path))
-            .add_source(Environment::with_prefix("da"))
-            .build()
-            .unwrap();
-
-        let da_config = config.try_deserialize::<HashMap<String, String>>().unwrap();
-
-        da_config
-    };
 }
