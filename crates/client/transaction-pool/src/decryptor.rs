@@ -1,15 +1,22 @@
 // This file is part of Encrypted mempool.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use encryptor::SequencerPoseidonEncryption;
 use jsonrpsee::core::client::ClientT;
 use jsonrpsee::core::params::ObjectParams;
 use jsonrpsee::rpc_params;
 use jsonrpsee::ws_client::WsClientBuilder;
+use mc_config::config_map;
 use mp_starknet::transaction::types::{EncryptedInvokeTransaction, InvokeTransaction};
 use serde_json::json;
 use vdf::VDF;
 /// Decryptor has delay function for calculate decryption key and
 /// decrypt function for decryption with poseidon algorithm
+
+static CURRENT_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone)]
 pub struct Decryptor {
     decrypt_function: SequencerPoseidonEncryption,
     delay_function: VDF,
@@ -61,13 +68,27 @@ impl Decryptor {
 
     /// Delegate to decrypt encrypted invoke transaction
     pub async fn delegate_to_decrypt_encrypted_invoke_transaction(
-        &self,
+        self,
         encrypted_invoke_transaction: EncryptedInvokeTransaction,
-        decryption_key: Option<String>,
     ) -> InvokeTransaction {
-        println!("Decrypting encrypted invoke transaction... using external decryptor");
+        let index = CURRENT_INDEX.load(Ordering::SeqCst);
 
-        let url = format!("ws://localhost:8080");
+        let config_map = config_map();
+        let external_decryptor_hosts =
+            config_map.get_array("external_decryptor_hosts").expect("sequencer_private_key must be set");
+
+        let external_decryptor_host = external_decryptor_hosts[index].to_string();
+        println!(
+            "Decrypting encrypted invoke transaction... using external decryptor - host: {}",
+            external_decryptor_host
+        );
+
+        CURRENT_INDEX.fetch_add(1, Ordering::SeqCst);
+        if CURRENT_INDEX.load(Ordering::SeqCst) == external_decryptor_hosts.len() {
+            CURRENT_INDEX.store(0, Ordering::SeqCst);
+        }
+
+        let url = format!("ws://{}", external_decryptor_host);
         let client = WsClientBuilder::default().build(&url).await.unwrap();
 
         let encrypted_invoke_transaction_json = json!(encrypted_invoke_transaction);

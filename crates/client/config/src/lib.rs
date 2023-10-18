@@ -7,10 +7,10 @@ use config::{Config, Environment, File};
 use serde::{Deserialize, Serialize};
 use toml;
 
-pub static mut CONFIG: MaybeUninit<ConfigMap> = MaybeUninit::uninit();
+pub static mut CONFIG: MaybeUninit<Config> = MaybeUninit::uninit();
 static INIT: Once = Once::new();
 
-pub fn config_map() -> &'static ConfigMap {
+pub fn config_map() -> &'static Config {
     if INIT.is_completed() {
         unsafe { CONFIG.assume_init_ref() }
     } else {
@@ -18,76 +18,51 @@ pub fn config_map() -> &'static ConfigMap {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ConfigMap {
-    inner: Mutex<HashMap<String, String>>,
-}
+pub fn init_config(path: &String) {
+    let file_path = format!("{}/Config.toml", path);
 
-impl Default for ConfigMap {
-    fn default() -> Self {
-        Self { inner: Mutex::new(HashMap::default()) }
-    }
-}
-
-impl ConfigMap {
-    pub fn init(path: &String) {
-        let file_path = format!("{}/Config.toml", path);
-
-        if let Some(parent_dir) = file_path.rfind('/') {
-            if let Err(e) = fs::create_dir_all(&file_path[0..parent_dir]) {
-                eprintln!("Failed to create directory: {:?}", e);
-            }
-        }
-
-        if !file_exists(&file_path) {
-            // Config file doesn't exist, create it with default values
-            let config = DaConfig::default();
-            save_config(&config, &file_path);
-        }
-
-        let config = Config::builder()
-            .add_source(File::with_name(&file_path))
-            .add_source(Environment::with_prefix("da"))
-            .build()
-            .unwrap();
-
-        let config: HashMap<String, String> = config.try_deserialize::<HashMap<String, String>>().unwrap();
-
-        unsafe {
-            INIT.call_once(|| {
-                let config_map = ConfigMap::default();
-                config.iter().for_each(|(key, value)| {
-                    config_map.insert(key, value);
-                });
-                CONFIG.write(config_map);
-            });
+    if let Some(parent_dir) = file_path.rfind('/') {
+        if let Err(e) = fs::create_dir_all(&file_path[0..parent_dir]) {
+            eprintln!("Failed to create directory: {:?}", e);
         }
     }
 
-    pub fn get(&self, key: impl AsRef<str>) -> Option<String> {
-        let map_guard = self.inner.lock().unwrap();
-        map_guard.get(key.as_ref()).cloned()
+    if !file_exists(&file_path) {
+        // Config file doesn't exist, create it with default values
+        let config = DefaultConfig::default();
+        save_config(&config, &file_path);
     }
 
-    pub fn insert(&self, key: impl ToString, value: impl ToString) {
-        let mut map_guard = self.inner.lock().unwrap();
-        map_guard.insert(key.to_string(), value.to_string());
+    let config: Config = Config::builder()
+        .add_source(File::with_name(&file_path))
+        .add_source(Environment::with_prefix("da"))
+        .build()
+        .unwrap();
+
+    println!("Config: {:?}", config.get_array("external_decryptor_hosts"));
+
+    unsafe {
+        INIT.call_once(|| {
+            CONFIG.write(config);
+        });
     }
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct DaConfig {
+pub struct DefaultConfig {
     sequencer_private_key: String,
+    external_decryptor_hosts: Vec<String>,
     is_validating: bool,
     host: String,
     namespace: String,
     auth_token: String,
 }
 
-impl Default for DaConfig {
+impl Default for DefaultConfig {
     fn default() -> Self {
-        DaConfig {
+        DefaultConfig {
             sequencer_private_key: "0x00c1cf1490de1352865301bb8705143f3ef938f97fdf892f1090dcb5ac7bcd1d".to_string(),
+            external_decryptor_hosts: vec!["localhost:8080".to_string(), "localhost:8081".to_string()],
             is_validating: false,
             host: "".to_string(),
             namespace: "".to_string(),

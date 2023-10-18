@@ -44,7 +44,7 @@ starknet-crypto = { workspace = true, default-features = false, features = [
   "alloc",
 ] }
 tokio = { workspace = true }
-
+mc-config = { workspace = true }
 mc-sync-block = { workspace = true }
 bincode = { workspace = true }
 jsonrpsee = { version = "0.20", features = ["server", "http-client", "ws-client", "macros", "client-ws-transport-native-tls"] }
