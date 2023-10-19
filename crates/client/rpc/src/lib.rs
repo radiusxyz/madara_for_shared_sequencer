@@ -1184,7 +1184,7 @@ where
 
             let tx_cnt = txs.len();
             println!("1. added length {} {}", tx_cnt, txs.get_order());
-            txs.get_order()
+            txs.get_order() - 1
         };
 
         {
@@ -1264,7 +1264,7 @@ where
                 }
             };
 
-            lock.txs.get_mut(&block_height).unwrap().clone().update_key_received(decryption_info.order);
+            lock.txs.get_mut(&block_height).unwrap().update_key_received(decryption_info.order);
         }
 
         let encrypted_invoke_transaction_string = serde_json::to_string(&encrypted_invoke_transaction)?;
@@ -1304,8 +1304,8 @@ where
             .decrypt_encrypted_invoke_transaction(encrypted_invoke_transaction, Some(decryption_info.decryption_key))
             .await;
         {
-            // let lock = epool.lock();
-            epool.clone().lock().await.get_txs(block_height).unwrap().clone().increase_decrypted_cnt();
+            let mut lock = epool.lock().await;
+            lock.txs.get_mut(&block_height).unwrap().increase_decrypted_cnt();
         }
 
         let chain_id = Felt252Wrapper(self.chain_id()?.0);
