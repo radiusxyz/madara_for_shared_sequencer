@@ -30,6 +30,7 @@ serde = { workspace = true }
 
 frame-system = { workspace = true }
 mc-sync-block = { workspace = true }
+mc-config = { workspace = true }
 sc-cli = { workspace = true }
 sc-client-api = { workspace = true }
 sc-consensus = { workspace = true }

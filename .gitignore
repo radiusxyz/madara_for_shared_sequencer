@@ -35,4 +35,6 @@ cairo_venv
 
 .env
 
+/crates/client/epool
+
 /epool

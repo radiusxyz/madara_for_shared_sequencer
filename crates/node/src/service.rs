@@ -10,6 +10,7 @@ use futures::prelude::*;
 use madara_runtime::opaque::Block;
 use madara_runtime::{self, Hash, RuntimeApi};
 use mc_block_proposer::ProposerFactory;
+use mc_config::config_map;
 use mc_mapping_sync::MappingSyncWorker;
 use mc_storage::overrides_handle;
 use mc_sync_block::sync_with_da;
@@ -263,9 +264,10 @@ pub fn new_full(config: Configuration, cli: Cli) -> Result<TaskManager, ServiceE
         transaction_pool,
         other: (block_import, grandpa_link, mut telemetry, madara_backend),
     } = new_partial(&config, &cli, build_import_queue)?;
-
-    task_manager.spawn_essential_handle().spawn("sync-DA", Some("sync-DA"), sync_with_da());
-
+    let config_map = config_map();
+    if config_map.get_bool("is_validating").unwrap() == true {
+        task_manager.spawn_essential_handle().spawn("sync-DA", Some("sync-DA"), sync_with_da());
+    }
     let mut net_config = sc_network::config::FullNetworkConfiguration::new(&config.network);
 
     let grandpa_protocol_name = sc_consensus_grandpa::protocol_standard_name(

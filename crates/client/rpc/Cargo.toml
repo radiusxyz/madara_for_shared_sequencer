@@ -63,7 +63,7 @@ tokio = { workspace = true }
 dotenv = { workspace = true }
 num-bigint = { workspace = true, default-features = false }
 rand = "0.8"
-
+mc-config = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }

@@ -1,13 +1,12 @@
-use std::env;
 use std::path::Path;
 use std::time::Instant;
 
 use base64::engine::general_purpose;
 use base64::Engine as _;
-use dotenv::dotenv;
 use hyper::header::HeaderValue;
 use hyper::{body, Body, Client, Request, StatusCode};
 use lazy_static::lazy_static;
+use mc_config::config_map;
 use rocksdb::{Error, IteratorMode, DB};
 use serde_json::{json, Value};
 use tokio;
@@ -145,10 +144,10 @@ fn encode_data_to_base64(original: String) -> String {
 }
 
 async fn submit_to_da(data: String) -> Result<String, Box<dyn std::error::Error>> {
-    dotenv().ok();
-    let da_host = env::var("DA_HOST")?;
-    let da_namespace = env::var("DA_NAMESPACE")?;
-    let da_auth_token = env::var("DA_AUTH_TOKEN")?;
+    let config_map = config_map();
+    let da_host = config_map.get_string("host").unwrap();
+    let da_namespace = config_map.get_string("namespace").unwrap();
+    let da_auth_token = config_map.get_string("auth_token").unwrap();
     let da_auth = format!("Bearer {}", da_auth_token);
 
     let encoded_data = encode_data_to_base64(data);
@@ -172,7 +171,7 @@ async fn submit_to_da(data: String) -> Result<String, Box<dyn std::error::Error>
     // Create a mutable request builder
     let request_builder = Request::builder()
         .method("POST")
-        .uri(&da_host)
+        .uri(da_host)
         .header("Authorization", da_auth.clone()) // Clone da_auth here
         .header("Content-Type", "application/json")
         .header("timeout", HeaderValue::from_static("100"))
@@ -196,10 +195,10 @@ async fn submit_to_da(data: String) -> Result<String, Box<dyn std::error::Error>
 }
 
 async fn retrieve_from_da(data: String) -> Result<String, Box<dyn std::error::Error>> {
-    dotenv().ok();
-    let da_host = env::var("DA_HOST")?;
-    let da_namespace = env::var("DA_NAMESPACE")?;
-    let da_auth_token = env::var("DA_AUTH_TOKEN")?;
+    let config_map = config_map();
+    let da_host = config_map.get_string("host").unwrap();
+    let da_namespace = config_map.get_string("namespace").unwrap();
+    let da_auth_token = config_map.get_string("auth_token").unwrap();
     let da_auth = format!("Bearer {}", da_auth_token);
 
     let block_height: u64 = data.parse().unwrap();
@@ -221,7 +220,7 @@ async fn retrieve_from_da(data: String) -> Result<String, Box<dyn std::error::Er
     // Create a mutable request builder
     let request_builder = Request::builder()
         .method("POST")
-        .uri(&da_host)
+        .uri(da_host)
         .header("Authorization", da_auth.clone()) // Clone da_auth here
         .header("Content-Type", "application/json")
         .header("timeout", HeaderValue::from_static("100"))

@@ -13,6 +13,7 @@ members = [
   "crates/client/storage",
   "crates/client/transaction-pool",
   "crates/client/sync-block",
+  "crates/client/config",
 ]
 
 [profile.release]
@@ -122,6 +123,8 @@ mc-rpc-core = { path = "crates/client/rpc-core" }
 mc-block-proposer = { path = "crates/client/block-proposer" }
 mc-transaction-pool = { path = "crates/client/transaction-pool" }
 mc-sync-block = { path = "crates/client/sync-block" }
+mc-config = { path = "crates/client/config" }
+
 
 # Madara runtime
 madara-runtime = { path = "crates/runtime" }

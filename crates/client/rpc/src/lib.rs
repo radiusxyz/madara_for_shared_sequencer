@@ -63,6 +63,7 @@ extern crate dotenv;
 use std::env;
 
 use dotenv::dotenv;
+use mc_config::config_map;
 use num_bigint::{BigInt, RandBigInt};
 use rand::rngs::OsRng;
 
@@ -1200,8 +1201,9 @@ where
         // Generate commitment
 
         // 1. Get sequencer private key
-        dotenv().ok();
-        let sequencer_private_key = env::var("SEQUENCER_PRIVATE_KEY").expect("SEQUENCER_PRIVATE_KEY must be set");
+        let config_map = config_map();
+        let sequencer_private_key =
+            config_map.get_string("sequencer_private_key").expect("sequencer_private_key must be set");
 
         // 2. Make random FieldElement for making k to sign
         let mut rng = OsRng;
@@ -1231,28 +1233,10 @@ where
         })
     }
 
-    // ///
-    // async fn add_invoke_transaction_with_order(
-    //     &self,
-    //     invoke_tx: InvokeTransaction,
-    //     order: u64,
-    // ) -> RpcResult<InvokeTransactionResult> {
-    //     let best_block_hash = self.client.info().best_hash;
-    //     let chain_id = Felt252Wrapper(self.chain_id()?.0);
-
-    //     let transaction: MPTransaction = invoke_tx.from_invoke(chain_id);
-
-    //     let extrinsic =
-    //         convert_transaction(self.client.clone(), best_block_hash, transaction.clone(),
-    // TxType::Invoke).await?;
-
-    //     submit_extrinsic_with_order(self.pool.clone(), best_block_hash, extrinsic, order).await?;
-
-    //     Ok(InvokeTransactionResult { transaction_hash: transaction.hash.into() })
-    // }
-
     async fn provide_decryption_key(&self, decryption_info: DecryptionInfo) -> RpcResult<ProvideDecryptionKeyResult> {
-        let sequencer_private_key = env::var("SEQUENCER_PRIVATE_KEY").expect("SEQUENCER_PRIVATE_KEY must be set");
+        let config_map = config_map();
+        let sequencer_private_key =
+            config_map.get_string("sequencer_private_key").expect("sequencer_private_key must be set");
         let sequencer_private_key = FieldElement::from_str(sequencer_private_key.as_str()).unwrap();
 
         let sequencer_public_key = get_public_key(&sequencer_private_key);
@@ -1362,8 +1346,6 @@ where
     B: BlockT,
     <B as BlockT>::Extrinsic: Send + Sync + 'static,
 {
-    println!("stompesi - submit_extrinsic_with_order - order: {:?}", order);
-
     pool.submit_one_with_order(&SPBlockId::hash(best_block_hash), TX_SOURCE, extrinsic, order).await.map_err(|e| {
         error!("Failed to submit extrinsic: {:?}", e);
         StarknetRpcApiError::InternalServerError
