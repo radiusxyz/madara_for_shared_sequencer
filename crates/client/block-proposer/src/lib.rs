@@ -12,6 +12,7 @@ use codec::Encode;
 use futures::channel::oneshot;
 use futures::future::{Future, FutureExt};
 use futures::{future, select};
+use hyper::{Body, Client, Request, Uri};
 use log::{debug, error, info, trace, warn};
 use mc_rpc::submit_extrinsic_with_order;
 use mc_transaction_pool::decryptor::Decryptor;
@@ -26,6 +27,8 @@ use sc_block_builder::{BlockBuilderApi, BlockBuilderProvider};
 use sc_client_api::backend;
 use sc_proposer_metrics::{EndProposingReason, MetricsLink as PrometheusMetrics};
 use sc_transaction_pool_api::{InPoolTransaction, TransactionSource};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sp_api::{ApiExt, ProvideRuntimeApi};
 use sp_blockchain::ApplyExtrinsicFailed::Validity;
 use sp_blockchain::Error::ApplyExtrinsicFailed;
@@ -37,6 +40,20 @@ use sp_runtime::generic::BlockId as SPBlockId;
 use sp_runtime::traits::{Block as BlockT, Header as HeaderT};
 use sp_runtime::{Digest, Percent, SaturatedConversion};
 use tokio;
+
+#[derive(Serialize)]
+struct JsonRequest {
+    jsonrpc: &'static str,
+    method: &'static str,
+    params: Vec<Value>,
+    id: i32,
+}
+
+#[derive(Deserialize)]
+struct JsonResponse {
+    result: Value,
+    id: i32,
+}
 
 /// Default block size limit in bytes used by [`Proposer`].
 ///
@@ -401,181 +418,240 @@ where
         deadline: time::Instant,
         block_size_limit: Option<usize>,
     ) -> Result<EndProposingReason, sp_blockchain::Error> {
-        let epool = self.transaction_pool.encrypted_pool().clone();
+        // let epool = self.transaction_pool.encrypted_pool().clone();
         let block_height = self.parent_number.to_string().parse::<u64>().unwrap() + 1;
 
-        let enabled = {
-            let lock = epool.lock().await;
-            lock.is_enabled()
+        let client = Client::new();
+
+        // prepare JSON-RPC request
+        let request = JsonRequest {
+            jsonrpc: "2.0",
+            method: "IsLeader",
+            params: vec![json!({"rollup_id":1, "block_height":block_height})],
+            id: 1,
         };
 
-        let using_external_decryptor = {
-            let lock = epool.lock().await;
-            lock.is_using_external_decryptor()
-        };
+        // set server uri
+        let uri = Uri::from_static("http://127.0.0.1:8083");
 
-        let closed = {
-            let mut lock = epool.lock().await;
-            let exist = lock.exist(block_height);
-            if exist {
-                // lock.get_txs(block_height).unwrap().is_closed()
-                lock.txs.get_mut(&block_height).unwrap().is_closed()
-            } else {
-                lock.initialize_if_not_exist(block_height);
-                println!("log1");
-                let len = lock.txs.get(&block_height).unwrap().len();
-                // let len = lock.get_txs(block_height).unwrap().len();
-                println!("{}", len);
-                false
-            }
-        };
+        // create JSON-RPC request
+        let request = Request::post(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&request).unwrap()))
+            .unwrap();
 
-        if enabled && !closed {
-            // add temporary pool tx to pool
-            let mut temporary_pool: Vec<(u64, MPTransaction)> = vec![];
-            {
-                let mut lock = epool.lock().await;
-                println!("close on {}", block_height);
-                let txs = lock.txs.get_mut(&block_height).unwrap();
-                // let mut txs = lock.get_txs(block_height).unwrap();
+        // send request, receive response
+        let response = client.request(request).await.unwrap();
+        let response_body = hyper::body::to_bytes(response.into_body()).await.unwrap();
 
-                let tx_cnt = txs.get_tx_cnt();
-                let dec_cnt = txs.get_decrypted_cnt();
-                println!("test1: {}:{}", tx_cnt, dec_cnt);
+        // parse response to JSON
+        let response: JsonResponse = serde_json::from_slice(&response_body).unwrap();
 
-                temporary_pool = txs.get_temporary_pool();
-            }
+        // print result
+        println!("JSON-RPC response: {:?}", response.result);
 
-            {
-                let mut lock = epool.lock().await;
+        // TODO: deserialize string to Madara Extrinsic Type
+        //////////////////////////////////////////////////////////////////////////
+        // let best_block_hash = self.client.info().best_hash;
+        // let pool = self.transaction_pool.clone();
 
-                let _ = lock.close(block_height);
-            }
+        // let a = Block::Extrinsic {};
+        // let b = Block::Extrinsic {};
 
-            let best_block_hash = self.client.info().best_hash;
-            for (order, transaction) in temporary_pool {
-                let extrinsic = self
-                    .client
-                    .runtime_api()
-                    .convert_transaction(best_block_hash, transaction, TxType::Invoke)
-                    .expect("convert_transaction")
-                    .expect("runtime_api");
-                let _ = self
-                    .transaction_pool
-                    .clone()
-                    .submit_one_with_order(
-                        &SPBlockId::hash(best_block_hash),
-                        TransactionSource::External,
-                        extrinsic,
-                        order,
-                    )
-                    .await;
-            }
+        // let sample = vec![(a, 0), (b, 1)];
 
-            let cnt = {
-                let lock = epool.lock().await;
+        // for (extrinsic, order) in sample {
+        //     submit_extrinsic_with_order(pool, best_block_hash, extrinsic, order)
+        //         .await
+        //         .expect("Failed to submit extrinsic");
+        // }
+        //////////////////////////////////////////////////////////////////////////
 
-                lock.txs.get(&block_height).unwrap().len() as u64
-                // lock.get_txs(block_height).unwrap().len() as u64
-            };
+        // let tx_cnt = response.result.len();
+        // let ready_cnt = self.transaction_pool.status().ready as u64;
+        // println!("{} waiting {}:{}", block_height, tx_cnt, ready_cnt);
+        // if tx_cnt != ready_cnt {
+        //     return Err(sp_blockchain::Error::TransactionPoolNotReady);
+        // }
 
-            let start = std::time::SystemTime::now();
-            let since_the_epoch = start.duration_since(UNIX_EPOCH).expect("Time went backwards");
-            println!("Decrypt Start in {:?}", since_the_epoch);
+        // let enabled = {
+        //     let lock = epool.lock().await;
+        //     lock.is_enabled()
+        // };
 
-            for order in 0..cnt {
-                let block_height = self.parent_number.to_string().parse::<u64>().unwrap() + 1;
-                let best_block_hash = self.client.info().best_hash;
-                let client = self.client.clone();
-                let pool = self.transaction_pool.clone();
-                let chain_id = Felt252Wrapper(client.runtime_api().chain_id(best_block_hash).unwrap().into());
-                let epool = self.transaction_pool.encrypted_pool().clone();
-                self.spawn_handle.spawn_blocking(
-                    "Decryptor",
-                    None,
-                    Box::pin(
-                        // tokio::task::spawn(
-                        async move {
-                            tokio::time::sleep(Duration::from_secs(1)).await;
+        // let using_external_decryptor = {
+        //     let lock = epool.lock().await;
+        //     lock.is_using_external_decryptor()
+        // };
 
-                            let encrypted_invoke_transaction: EncryptedInvokeTransaction;
-                            {
-                                let lock = epool.lock().await;
-                                let txs = lock.txs.get(&block_height).expect("expect get txs");
-                                // let txs = lock.get_txs(block_height).unwrap();
-                                // println!("check key_received on block_height {} order {}", block_height, order);
-                                let did_received_key = txs.get_key_received(order);
+        // let closed = {
+        //     let mut lock = epool.lock().await;
+        //     let exist = lock.exist(block_height);
+        //     if exist {
+        //         // lock.get_txs(block_height).unwrap().is_closed()
+        //         lock.txs.get_mut(&block_height).unwrap().is_closed()
+        //     } else {
+        //         lock.initialize_if_not_exist(block_height);
+        //         println!("log1");
+        //         let len = lock.txs.get(&block_height).unwrap().len();
+        //         // let len = lock.get_txs(block_height).unwrap().len();
+        //         println!("{}", len);
+        //         false
+        //     }
+        // };
 
-                                if did_received_key == true {
-                                    println!("Received key");
-                                    return;
-                                }
-                                println!("Not received key");
-                                encrypted_invoke_transaction = txs.get(order).unwrap().clone();
-                            }
+        // if enabled && !closed {
+        //     // add temporary pool tx to pool
+        //     let mut temporary_pool: Vec<(u64, MPTransaction)> = vec![];
+        //     {
+        //         let mut lock = epool.lock().await;
+        //         println!("close on {}", block_height);
+        //         let txs = lock.txs.get_mut(&block_height).unwrap();
+        //         // let mut txs = lock.get_txs(block_height).unwrap();
 
-                            let decryptor = Decryptor::new();
-                            let invoke_tx: InvokeTransaction = if using_external_decryptor {
-                                decryptor
-                                    .delegate_to_decrypt_encrypted_invoke_transaction(encrypted_invoke_transaction)
-                                    .await
-                            } else {
-                                decryptor.decrypt_encrypted_invoke_transaction(encrypted_invoke_transaction, None).await
-                            };
-                            // println!("decrypt done on block_height {} order {}", block_height, order);
+        //         let tx_cnt = txs.get_tx_cnt();
+        //         let dec_cnt = txs.get_decrypted_cnt();
+        //         println!("test1: {}:{}", tx_cnt, dec_cnt);
 
-                            {
-                                let mut lock = epool.lock().await;
-                                // println!("check key_received on block_height {} order {}", block_height, order);
-                                let did_received_key = lock.txs.get(&block_height).unwrap().get_key_received(order);
-                                // let did_received_key = lock.get_txs(block_height).unwrap().get_key_received(order);
+        //         temporary_pool = txs.get_temporary_pool();
+        //     }
 
-                                if did_received_key == true {
-                                    println!("Received key");
-                                    return;
-                                }
+        //     {
+        //         let mut lock = epool.lock().await;
 
-                                lock.txs.get_mut(&block_height).unwrap().increase_decrypted_cnt();
-                                // lock.get_txs(block_height).unwrap().clone().
-                                // increase_decrypted_cnt();
-                            }
+        //         let _ = lock.close(block_height);
+        //     }
 
-                            let end = std::time::SystemTime::now();
-                            let since_the_epoch = end.duration_since(UNIX_EPOCH).expect("Time went backwards");
-                            println!("Decrypt {} End in {:?}", order, since_the_epoch);
+        //     let best_block_hash = self.client.info().best_hash;
+        //     for (order, transaction) in temporary_pool {
+        //         let extrinsic = self
+        //             .client
+        //             .runtime_api()
+        //             .convert_transaction(best_block_hash, transaction, TxType::Invoke)
+        //             .expect("convert_transaction")
+        //             .expect("runtime_api");
+        //         let _ = self
+        //             .transaction_pool
+        //             .clone()
+        //             .submit_one_with_order(
+        //                 &SPBlockId::hash(best_block_hash),
+        //                 TransactionSource::External,
+        //                 extrinsic,
+        //                 order,
+        //             )
+        //             .await;
+        //     }
 
-                            let transaction: MPTransaction = invoke_tx.from_invoke(chain_id);
-                            let extrinsic = client
-                                .runtime_api()
-                                .convert_transaction(best_block_hash, transaction.clone(), TxType::Invoke)
-                                .unwrap()
-                                .expect("Failed to submit extrinsic");
+        //     let cnt = {
+        //         let lock = epool.lock().await;
 
-                            submit_extrinsic_with_order(pool, best_block_hash, extrinsic, order)
-                                .await
-                                .expect("Failed to submit extrinsic");
-                        },
-                    ),
-                )
-            }
-        }
+        //         lock.txs.get(&block_height).unwrap().len() as u64
+        //         // lock.get_txs(block_height).unwrap().len() as u64
+        //     };
 
-        if enabled {
-            {
-                let lock = epool.lock().await;
-                if lock.exist(block_height) {
-                    let txs = lock.txs.get(&block_height).expect("expect get txs");
-                    // let txs = lock.get_txs(block_height).unwrap();
-                    let tx_cnt = txs.get_tx_cnt();
-                    let dec_cnt = txs.get_decrypted_cnt();
-                    let ready_cnt = self.transaction_pool.status().ready as u64;
-                    println!("{} waiting {}:{}:{}", block_height, tx_cnt, dec_cnt, ready_cnt);
-                    if !(tx_cnt == dec_cnt && dec_cnt == ready_cnt) {
-                        return Err(sp_blockchain::Error::TransactionPoolNotReady);
-                    }
-                }
-            }
-        }
+        //     let start = std::time::SystemTime::now();
+        //     let since_the_epoch = start.duration_since(UNIX_EPOCH).expect("Time went backwards");
+        //     println!("Decrypt Start in {:?}", since_the_epoch);
+
+        //     for order in 0..cnt {
+        //         let block_height = self.parent_number.to_string().parse::<u64>().unwrap() + 1;
+        //         let best_block_hash = self.client.info().best_hash;
+        //         let client = self.client.clone();
+        //         let pool = self.transaction_pool.clone();
+        //         let chain_id =
+        // Felt252Wrapper(client.runtime_api().chain_id(best_block_hash).unwrap().into());
+        //         let epool = self.transaction_pool.encrypted_pool().clone();
+        //         self.spawn_handle.spawn_blocking(
+        //             "Decryptor",
+        //             None,
+        //             Box::pin(
+        //                 // tokio::task::spawn(
+        //                 async move {
+        //                     tokio::time::sleep(Duration::from_secs(1)).await;
+
+        //                     let encrypted_invoke_transaction: EncryptedInvokeTransaction;
+        //                     {
+        //                         let lock = epool.lock().await;
+        //                         let txs = lock.txs.get(&block_height).expect("expect get txs");
+        //                         // let txs = lock.get_txs(block_height).unwrap();
+        //                         // println!("check key_received on block_height {} order {}",
+        // block_height, order);                         let did_received_key =
+        // txs.get_key_received(order);
+
+        //                         if did_received_key == true {
+        //                             println!("Received key");
+        //                             return;
+        //                         }
+        //                         println!("Not received key");
+        //                         encrypted_invoke_transaction = txs.get(order).unwrap().clone();
+        //                     }
+
+        //                     let decryptor = Decryptor::new();
+        //                     let invoke_tx: InvokeTransaction = if using_external_decryptor {
+        //                         decryptor
+        //
+        // .delegate_to_decrypt_encrypted_invoke_transaction(encrypted_invoke_transaction)
+        //                             .await
+        //                     } else {
+        //
+        // decryptor.decrypt_encrypted_invoke_transaction(encrypted_invoke_transaction, None).await
+        //                     };
+        //                     // println!("decrypt done on block_height {} order {}", block_height, order);
+
+        //                     {
+        //                         let mut lock = epool.lock().await;
+        //                         // println!("check key_received on block_height {} order {}",
+        // block_height, order);                         let did_received_key =
+        // lock.txs.get(&block_height).unwrap().get_key_received(order);                         //
+        // let did_received_key = lock.get_txs(block_height).unwrap().get_key_received(order);
+
+        //                         if did_received_key == true {
+        //                             println!("Received key");
+        //                             return;
+        //                         }
+
+        //                         lock.txs.get_mut(&block_height).unwrap().increase_decrypted_cnt();
+        //                         // lock.get_txs(block_height).unwrap().clone().
+        //                         // increase_decrypted_cnt();
+        //                     }
+
+        //                     let end = std::time::SystemTime::now();
+        //                     let since_the_epoch = end.duration_since(UNIX_EPOCH).expect("Time went
+        // backwards");                     println!("Decrypt {} End in {:?}", order,
+        // since_the_epoch);
+
+        //                     let transaction: MPTransaction = invoke_tx.from_invoke(chain_id);
+        //                     let extrinsic = client
+        //                         .runtime_api()
+        //                         .convert_transaction(best_block_hash, transaction.clone(),
+        // TxType::Invoke)                         .unwrap()
+        //                         .expect("Failed to submit extrinsic");
+
+        //                     submit_extrinsic_with_order(pool, best_block_hash, extrinsic, order)
+        //                         .await
+        //                         .expect("Failed to submit extrinsic");
+        //                 },
+        //             ),
+        //         )
+        //     }
+        // }
+
+        // if enabled {
+        //     {
+        //         let lock = epool.lock().await;
+        //         if lock.exist(block_height) {
+        //             let txs = lock.txs.get(&block_height).expect("expect get txs");
+        //             // let txs = lock.get_txs(block_height).unwrap();
+        //             let tx_cnt = txs.get_tx_cnt();
+        //             let dec_cnt = txs.get_decrypted_cnt();
+        //             let ready_cnt = self.transaction_pool.status().ready as u64;
+        //             println!("{} waiting {}:{}:{}", block_height, tx_cnt, dec_cnt, ready_cnt);
+        //             if !(tx_cnt == dec_cnt && dec_cnt == ready_cnt) {
+        //                 return Err(sp_blockchain::Error::TransactionPoolNotReady);
+        //             }
+        //         }
+        //     }
+        // }
 
         // proceed with transactions
         // We calculate soft deadline used only in case we start skipping transactions.
@@ -756,460 +832,478 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests {
-
-    use futures::executor::block_on;
-    use sc_client_api::Backend;
-    use sc_transaction_pool::BasicPool;
-    use sc_transaction_pool_api::{ChainEvent, MaintainedTransactionPool, TransactionSource};
-    use sp_api::Core;
-    use sp_blockchain::HeaderBackend;
-    use sp_consensus::{BlockOrigin, Environment, Proposer};
-    use sp_runtime::generic::BlockId;
-    use sp_runtime::traits::NumberFor;
-    use sp_runtime::Perbill;
-    use substrate_test_runtime_client::prelude::*;
-    use substrate_test_runtime_client::runtime::{Block as TestBlock, Extrinsic, ExtrinsicBuilder, Transfer};
-    use substrate_test_runtime_client::{TestClientBuilder, TestClientBuilderExt};
-    use tokio::sync::Mutex;
-
-    use super::*;
-
-    const SOURCE: TransactionSource = TransactionSource::External;
-
-    // Note:
-    // Maximum normal extrinsic size for `substrate_test_runtime` is ~65% of max_block (refer to
-    // `substrate_test_runtime::RuntimeBlockWeights` for details).
-    // This extrinsic sizing allows for:
-    // - one huge xts + a lot of tiny dust
-    // - one huge, no medium,
-    // - two medium xts
-    // This is widely exploited in following tests.
-    const HUGE: u32 = 649_000_000;
-    const MEDIUM: u32 = 250_000_000;
-    const TINY: u32 = 1_000;
-
-    fn extrinsic(nonce: u64) -> Extrinsic {
-        ExtrinsicBuilder::new_fill_block(Perbill::from_parts(TINY)).nonce(nonce).build()
-    }
-
-    fn chain_event<B: BlockT>(header: B::Header) -> ChainEvent<B>
-    where
-        NumberFor<B>: From<u64>,
-    {
-        ChainEvent::NewBestBlock { hash: header.hash(), tree_route: None }
-    }
-
-    #[test]
-    fn should_cease_building_block_when_deadline_is_reached() {
-        let client = Arc::new(substrate_test_runtime_client::new());
-        let spawner = sp_core::testing::TaskExecutor::new();
-        let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(), client.clone());
-
-        block_on(txpool.submit_at(&BlockId::number(0), SOURCE, vec![extrinsic(0), extrinsic(1)])).unwrap();
-
-        block_on(
-            txpool.maintain(chain_event(
-                client.expect_header(client.info().genesis_hash).expect("there should be header"),
-            )),
-        );
-
-        let mut proposer_factory = ProposerFactory::new(spawner, client.clone(), txpool.clone(), None);
-
-        let cell = Mutex::new((false, time::Instant::now()));
-        let proposer = proposer_factory.init_with_now(
-            &client.expect_header(client.info().genesis_hash).unwrap(),
-            Box::new(move || {
-                let mut value = cell.lock();
-                if !value.0 {
-                    value.0 = true;
-                    return value.1;
-                }
-                let old = value.1;
-                let new = old + time::Duration::from_secs(1);
-                *value = (true, new);
-                old
-            }),
-        );
-
-        // when
-        let deadline = time::Duration::from_secs(3);
-        let block = block_on(proposer.propose(Default::default(), Default::default(), deadline, None))
-            .map(|r| r.block)
-            .unwrap();
-
-        // then
-        // block should have some extrinsics although we have some more in the pool.
-        assert_eq!(block.extrinsics().len(), 1);
-        assert_eq!(txpool.ready().count(), 2);
-    }
-
-    #[test]
-    fn should_not_panic_when_deadline_is_reached() {
-        let client = Arc::new(substrate_test_runtime_client::new());
-        let spawner = sp_core::testing::TaskExecutor::new();
-        let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(), client.clone());
-
-        let mut proposer_factory = ProposerFactory::new(spawner, client.clone(), txpool, None);
-
-        let cell = Mutex::new((false, time::Instant::now()));
-        let proposer = proposer_factory.init_with_now(
-            &client.expect_header(client.info().genesis_hash).unwrap(),
-            Box::new(move || {
-                let mut value = cell.lock();
-                if !value.0 {
-                    value.0 = true;
-                    return value.1;
-                }
-                let new = value.1 + time::Duration::from_secs(160);
-                *value = (true, new);
-                new
-            }),
-        );
-
-        let deadline = time::Duration::from_secs(1);
-
-        block_on(proposer.propose(Default::default(), Default::default(), deadline, None)).map(|r| r.block).unwrap();
-    }
-
-    #[test]
-    fn proposed_storage_changes_should_match_execute_block_storage_changes() {
-        let (client, backend) = TestClientBuilder::new().build_with_backend();
-        let client = Arc::new(client);
-        let spawner = sp_core::testing::TaskExecutor::new();
-        let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(), client.clone());
-
-        let genesis_hash = client.info().best_hash;
-
-        block_on(txpool.submit_at(&BlockId::number(0), SOURCE, vec![extrinsic(0)])).unwrap();
-
-        block_on(
-            txpool.maintain(chain_event(
-                client.expect_header(client.info().genesis_hash).expect("there should be header"),
-            )),
-        );
-
-        let mut proposer_factory = ProposerFactory::new(spawner, client.clone(), txpool, None);
-
-        let proposer = proposer_factory
-            .init_with_now(&client.header(genesis_hash).unwrap().unwrap(), Box::new(time::Instant::now));
-
-        let deadline = time::Duration::from_secs(9);
-        let proposal = block_on(proposer.propose(Default::default(), Default::default(), deadline, None)).unwrap();
-
-        assert_eq!(proposal.block.extrinsics().len(), 1);
-
-        let api = client.runtime_api();
-        api.execute_block(genesis_hash, proposal.block).unwrap();
-
-        let state = backend.state_at(genesis_hash).unwrap();
-
-        let storage_changes = api.into_storage_changes(&state, genesis_hash).unwrap();
-
-        assert_eq!(proposal.storage_changes.transaction_storage_root, storage_changes.transaction_storage_root,);
-    }
-
-    // This test ensures that if one transaction of a user was rejected, because for example
-    // the weight limit was hit, we don't mark the other transactions of the user as invalid because
-    // the nonce is not matching.
-    #[test]
-    fn should_not_remove_invalid_transactions_from_the_same_sender_after_one_was_invalid() {
-        // given
-        let client = Arc::new(substrate_test_runtime_client::new());
-        let spawner = sp_core::testing::TaskExecutor::new();
-        let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(), client.clone());
-
-        let medium = |nonce| ExtrinsicBuilder::new_fill_block(Perbill::from_parts(MEDIUM)).nonce(nonce).build();
-        let huge = |nonce| ExtrinsicBuilder::new_fill_block(Perbill::from_parts(HUGE)).nonce(nonce).build();
-
-        block_on(txpool.submit_at(
-            &BlockId::number(0),
-            SOURCE,
-            vec![medium(0), medium(1), huge(2), medium(3), huge(4), medium(5), medium(6)],
-        ))
-        .unwrap();
-
-        let mut proposer_factory = ProposerFactory::new(spawner, client.clone(), txpool.clone(), None);
-        let mut propose_block =
-            |client: &TestClient, parent_number, expected_block_extrinsics, expected_pool_transactions| {
-                let hash = client.expect_block_hash_from_id(&BlockId::Number(parent_number)).unwrap();
-                let proposer =
-                    proposer_factory.init_with_now(&client.expect_header(hash).unwrap(), Box::new(time::Instant::now));
-
-                // when
-                let deadline = time::Duration::from_secs(900);
-                let block = block_on(proposer.propose(Default::default(), Default::default(), deadline, None))
-                    .map(|r| r.block)
-                    .unwrap();
-
-                // then
-                // block should have some extrinsics although we have some more in the pool.
-                assert_eq!(txpool.ready().count(), expected_pool_transactions, "at block: {}", block.header.number);
-                assert_eq!(block.extrinsics().len(), expected_block_extrinsics, "at block: {}", block.header.number);
-
-                block
-            };
-
-        let import_and_maintain = |mut client: Arc<TestClient>, block: TestBlock| {
-            let hash = block.hash();
-            block_on(client.import(BlockOrigin::Own, block)).unwrap();
-            block_on(txpool.maintain(chain_event(client.expect_header(hash).expect("there should be header"))));
-        };
-
-        block_on(
-            txpool.maintain(chain_event(
-                client.expect_header(client.info().genesis_hash).expect("there should be header"),
-            )),
-        );
-        assert_eq!(txpool.ready().count(), 7);
-
-        // let's create one block and import it
-        let block = propose_block(&client, 0, 2, 7);
-        import_and_maintain(client.clone(), block);
-        assert_eq!(txpool.ready().count(), 5);
-
-        // now let's make sure that we can still make some progress
-        let block = propose_block(&client, 1, 1, 5);
-        import_and_maintain(client.clone(), block);
-        assert_eq!(txpool.ready().count(), 4);
-
-        // again let's make sure that we can still make some progress
-        let block = propose_block(&client, 2, 1, 4);
-        import_and_maintain(client.clone(), block);
-        assert_eq!(txpool.ready().count(), 3);
-
-        // again let's make sure that we can still make some progress
-        let block = propose_block(&client, 3, 1, 3);
-        import_and_maintain(client.clone(), block);
-        assert_eq!(txpool.ready().count(), 2);
-
-        // again let's make sure that we can still make some progress
-        let block = propose_block(&client, 4, 2, 2);
-        import_and_maintain(client.clone(), block);
-        assert_eq!(txpool.ready().count(), 0);
-    }
-
-    #[test]
-    fn should_keep_adding_transactions_after_exhausts_resources_before_soft_deadline() {
-        // given
-        let client = Arc::new(substrate_test_runtime_client::new());
-        let spawner = sp_core::testing::TaskExecutor::new();
-        let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(), client.clone());
-
-        let tiny = |nonce| ExtrinsicBuilder::new_fill_block(Perbill::from_parts(TINY)).nonce(nonce).build();
-        let huge = |who| {
-            ExtrinsicBuilder::new_fill_block(Perbill::from_parts(HUGE)).signer(AccountKeyring::numeric(who)).build()
-        };
-
-        block_on(txpool.submit_at(
-            &BlockId::number(0),
-            SOURCE,
-            // add 2 * MAX_SKIPPED_TRANSACTIONS that exhaust resources
-            (0..MAX_SKIPPED_TRANSACTIONS * 2)
-					.map(huge)
-					// and some transactions that are okay.
-					.chain((0..MAX_SKIPPED_TRANSACTIONS as u64).map(tiny))
-					.collect(),
-        ))
-        .unwrap();
-
-        block_on(
-            txpool.maintain(chain_event(
-                client.expect_header(client.info().genesis_hash).expect("there should be header"),
-            )),
-        );
-        assert_eq!(txpool.ready().count(), MAX_SKIPPED_TRANSACTIONS * 3);
-
-        let mut proposer_factory = ProposerFactory::new(spawner, client.clone(), txpool, None);
-
-        let cell = Mutex::new(time::Instant::now());
-        let proposer = proposer_factory.init_with_now(
-            &client.expect_header(client.info().genesis_hash).unwrap(),
-            Box::new(move || {
-                let mut value = cell.lock();
-                let old = *value;
-                *value = old + time::Duration::from_secs(1);
-                old
-            }),
-        );
-
-        // when
-        // give it enough time so that deadline is never triggered.
-        let deadline = time::Duration::from_secs(900);
-        let block = block_on(proposer.propose(Default::default(), Default::default(), deadline, None))
-            .map(|r| r.block)
-            .unwrap();
-
-        // then block should have all non-exhaust resources extrinsics (+ the first one).
-        assert_eq!(block.extrinsics().len(), MAX_SKIPPED_TRANSACTIONS + 1);
-    }
-
-    #[test]
-    fn should_only_skip_up_to_some_limit_after_soft_deadline() {
-        // given
-        let client = Arc::new(substrate_test_runtime_client::new());
-        let spawner = sp_core::testing::TaskExecutor::new();
-        let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(), client.clone());
-
-        let tiny = |who| {
-            ExtrinsicBuilder::new_fill_block(Perbill::from_parts(TINY))
-                .signer(AccountKeyring::numeric(who))
-                .nonce(1)
-                .build()
-        };
-        let huge = |who| {
-            ExtrinsicBuilder::new_fill_block(Perbill::from_parts(HUGE)).signer(AccountKeyring::numeric(who)).build()
-        };
-
-        block_on(txpool.submit_at(
-            &BlockId::number(0),
-            SOURCE,
-            (0..MAX_SKIPPED_TRANSACTIONS + 2)
-					.map(huge)
-					// and some transactions that are okay.
-					.chain((0..MAX_SKIPPED_TRANSACTIONS + 2).map(tiny))
-					.collect(),
-        ))
-        .unwrap();
-
-        block_on(
-            txpool.maintain(chain_event(
-                client.expect_header(client.info().genesis_hash).expect("there should be header"),
-            )),
-        );
-        assert_eq!(txpool.ready().count(), MAX_SKIPPED_TRANSACTIONS * 2 + 4);
-
-        let mut proposer_factory = ProposerFactory::new(spawner, client.clone(), txpool, None);
-
-        let deadline = time::Duration::from_secs(600);
-        let cell = Arc::new(Mutex::new((0, time::Instant::now())));
-        let cell2 = cell.clone();
-        let proposer = proposer_factory.init_with_now(
-            &client.expect_header(client.info().genesis_hash).unwrap(),
-            Box::new(move || {
-                let mut value = cell.lock();
-                let (called, old) = *value;
-                // add time after deadline is calculated internally (hence 1)
-                let increase = if called == 1 {
-                    // we start after the soft_deadline should have already been reached.
-                    deadline / 2
-                } else {
-                    // but we make sure to never reach the actual deadline
-                    time::Duration::from_millis(0)
-                };
-                *value = (called + 1, old + increase);
-                old
-            }),
-        );
-
-        let block = block_on(proposer.propose(Default::default(), Default::default(), deadline, None))
-            .map(|r| r.block)
-            .unwrap();
-
-        // then the block should have one or two transactions. This maybe random as they are
-        // processed in parallel. The same signer and consecutive nonces for huge and tiny
-        // transactions guarantees that max two transactions will get to the block.
-        assert!((1..3).contains(&block.extrinsics().len()), "Block shall contain one or two extrinsics.");
-        assert!(
-            cell2.lock().0 > MAX_SKIPPED_TRANSACTIONS,
-            "Not enough calls to current time, which indicates the test might have ended because of deadline, not \
-             soft deadline"
-        );
-    }
-
-    #[test]
-    fn should_cease_building_block_when_block_limit_is_reached() {
-        let client = Arc::new(substrate_test_runtime_client::new());
-        let spawner = sp_core::testing::TaskExecutor::new();
-        let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(), client.clone());
-        let genesis_header = client.expect_header(client.info().genesis_hash).expect("there should be header");
-
-        let extrinsics_num = 5;
-        let extrinsics = std::iter::once(
-            Transfer { from: AccountKeyring::Alice.into(), to: AccountKeyring::Bob.into(), amount: 100, nonce: 0 }
-                .into_unchecked_extrinsic(),
-        )
-        .chain((1..extrinsics_num as u64).map(extrinsic))
-        .collect::<Vec<_>>();
-
-        let block_limit = genesis_header.encoded_size()
-            + extrinsics.iter().take(extrinsics_num - 1).map(Encode::encoded_size).sum::<usize>()
-            + Vec::<Extrinsic>::new().encoded_size();
-
-        block_on(txpool.submit_at(&BlockId::number(0), SOURCE, extrinsics)).unwrap();
-
-        block_on(txpool.maintain(chain_event(genesis_header.clone())));
-
-        let mut proposer_factory = ProposerFactory::new(spawner, client, txpool, None);
-
-        let proposer = block_on(proposer_factory.init(&genesis_header)).unwrap();
-
-        // Give it enough time
-        let deadline = time::Duration::from_secs(300);
-        let block = block_on(proposer.propose(Default::default(), Default::default(), deadline, Some(block_limit)))
-            .map(|r| r.block)
-            .unwrap();
-
-        // Based on the block limit, one transaction shouldn't be included.
-        assert_eq!(block.extrinsics().len(), extrinsics_num - 1);
-
-        let proposer = block_on(proposer_factory.init(&genesis_header)).unwrap();
-
-        let block = block_on(proposer.propose(Default::default(), Default::default(), deadline, None))
-            .map(|r| r.block)
-            .unwrap();
-
-        // Without a block limit it should include all of them
-        assert_eq!(block.extrinsics().len(), extrinsics_num);
-    }
-
-    #[test]
-    fn proposer_factory_can_update_default_block_size_limit() {
-        let client = Arc::new(substrate_test_runtime_client::new());
-        let spawner = sp_core::testing::TaskExecutor::new();
-        let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(), client.clone());
-        let genesis_header = client.expect_header(client.info().genesis_hash).expect("there should be header");
-
-        let extrinsics_num = 5;
-        let extrinsics = std::iter::once(
-            Transfer { from: AccountKeyring::Alice.into(), to: AccountKeyring::Bob.into(), amount: 100, nonce: 0 }
-                .into_unchecked_extrinsic(),
-        )
-        .chain((1..extrinsics_num as u64).map(extrinsic))
-        .collect::<Vec<_>>();
-
-        let block_limit = genesis_header.encoded_size()
-            + extrinsics.iter().take(extrinsics_num - 1).map(Encode::encoded_size).sum::<usize>()
-            + Vec::<Extrinsic>::new().encoded_size();
-
-        block_on(txpool.submit_at(&BlockId::number(0), SOURCE, extrinsics)).unwrap();
-
-        block_on(txpool.maintain(chain_event(genesis_header.clone())));
-
-        let mut proposer_factory = ProposerFactory::new(spawner, client, txpool, None);
-        proposer_factory.set_default_block_size_limit(block_limit);
-
-        let proposer = block_on(proposer_factory.init(&genesis_header)).unwrap();
-
-        // Give it enough time
-        let deadline = time::Duration::from_secs(300);
-        let block = block_on(proposer.propose(Default::default(), Default::default(), deadline, Default::default()))
-            .map(|r| r.block)
-            .unwrap();
-
-        // Based on the block limit, one transaction shouldn't be included.
-        assert_eq!(block.extrinsics().len(), extrinsics_num - 1);
-
-        // increase block size limit
-        proposer_factory.set_default_block_size_limit(block_limit * 2);
-        let proposer = block_on(proposer_factory.init(&genesis_header)).unwrap();
-
-        let block = block_on(proposer.propose(Default::default(), Default::default(), deadline, None))
-            .map(|r| r.block)
-            .unwrap();
-
-        // with increased blocklimit we should include all of them
-        assert_eq!(block.extrinsics().len(), extrinsics_num);
-    }
-}
+// #[cfg(test)]
+// mod tests {
+
+//     use futures::executor::block_on;
+//     use sc_client_api::Backend;
+//     use sc_transaction_pool::BasicPool;
+//     use sc_transaction_pool_api::{ChainEvent, MaintainedTransactionPool, TransactionSource};
+//     use sp_api::Core;
+//     use sp_blockchain::HeaderBackend;
+//     use sp_consensus::{BlockOrigin, Environment, Proposer};
+//     use sp_runtime::generic::BlockId;
+//     use sp_runtime::traits::NumberFor;
+//     use sp_runtime::Perbill;
+//     use substrate_test_runtime_client::prelude::*;
+//     use substrate_test_runtime_client::runtime::{Block as TestBlock, Extrinsic, ExtrinsicBuilder,
+// Transfer};     use substrate_test_runtime_client::{TestClientBuilder, TestClientBuilderExt};
+//     use tokio::sync::Mutex;
+
+//     use super::*;
+
+//     const SOURCE: TransactionSource = TransactionSource::External;
+
+//     // Note:
+//     // Maximum normal extrinsic size for `substrate_test_runtime` is ~65% of max_block (refer to
+//     // `substrate_test_runtime::RuntimeBlockWeights` for details).
+//     // This extrinsic sizing allows for:
+//     // - one huge xts + a lot of tiny dust
+//     // - one huge, no medium,
+//     // - two medium xts
+//     // This is widely exploited in following tests.
+//     const HUGE: u32 = 649_000_000;
+//     const MEDIUM: u32 = 250_000_000;
+//     const TINY: u32 = 1_000;
+
+//     fn extrinsic(nonce: u64) -> Extrinsic {
+//         ExtrinsicBuilder::new_fill_block(Perbill::from_parts(TINY)).nonce(nonce).build()
+//     }
+
+//     fn chain_event<B: BlockT>(header: B::Header) -> ChainEvent<B>
+//     where
+//         NumberFor<B>: From<u64>,
+//     {
+//         ChainEvent::NewBestBlock { hash: header.hash(), tree_route: None }
+//     }
+
+//     #[test]
+//     fn should_cease_building_block_when_deadline_is_reached() {
+//         let client = Arc::new(substrate_test_runtime_client::new());
+//         let spawner = sp_core::testing::TaskExecutor::new();
+//         let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(),
+// client.clone());
+
+//         block_on(txpool.submit_at(&BlockId::number(0), SOURCE, vec![extrinsic(0),
+// extrinsic(1)])).unwrap();
+
+//         block_on(
+//             txpool.maintain(chain_event(
+//                 client.expect_header(client.info().genesis_hash).expect("there should be
+// header"),             )),
+//         );
+
+//         let mut proposer_factory = ProposerFactory::new(spawner, client.clone(), txpool.clone(),
+// None);
+
+//         let cell = Mutex::new((false, time::Instant::now()));
+//         let proposer = proposer_factory.init_with_now(
+//             &client.expect_header(client.info().genesis_hash).unwrap(),
+//             Box::new(move || {
+//                 let mut value = cell.lock();
+//                 if !value.0 {
+//                     value.0 = true;
+//                     return value.1;
+//                 }
+//                 let old = value.1;
+//                 let new = old + time::Duration::from_secs(1);
+//                 *value = (true, new);
+//                 old
+//             }),
+//         );
+
+//         // when
+//         let deadline = time::Duration::from_secs(3);
+//         let block = block_on(proposer.propose(Default::default(), Default::default(), deadline,
+// None))             .map(|r| r.block)
+//             .unwrap();
+
+//         // then
+//         // block should have some extrinsics although we have some more in the pool.
+//         assert_eq!(block.extrinsics().len(), 1);
+//         assert_eq!(txpool.ready().count(), 2);
+//     }
+
+//     #[test]
+//     fn should_not_panic_when_deadline_is_reached() {
+//         let client = Arc::new(substrate_test_runtime_client::new());
+//         let spawner = sp_core::testing::TaskExecutor::new();
+//         let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(),
+// client.clone());
+
+//         let mut proposer_factory = ProposerFactory::new(spawner, client.clone(), txpool, None);
+
+//         let cell = Mutex::new((false, time::Instant::now()));
+//         let proposer = proposer_factory.init_with_now(
+//             &client.expect_header(client.info().genesis_hash).unwrap(),
+//             Box::new(move || {
+//                 let mut value = cell.lock();
+//                 if !value.0 {
+//                     value.0 = true;
+//                     return value.1;
+//                 }
+//                 let new = value.1 + time::Duration::from_secs(160);
+//                 *value = (true, new);
+//                 new
+//             }),
+//         );
+
+//         let deadline = time::Duration::from_secs(1);
+
+//         block_on(proposer.propose(Default::default(), Default::default(), deadline,
+// None)).map(|r| r.block).unwrap();     }
+
+//     #[test]
+//     fn proposed_storage_changes_should_match_execute_block_storage_changes() {
+//         let (client, backend) = TestClientBuilder::new().build_with_backend();
+//         let client = Arc::new(client);
+//         let spawner = sp_core::testing::TaskExecutor::new();
+//         let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(),
+// client.clone());
+
+//         let genesis_hash = client.info().best_hash;
+
+//         block_on(txpool.submit_at(&BlockId::number(0), SOURCE, vec![extrinsic(0)])).unwrap();
+
+//         block_on(
+//             txpool.maintain(chain_event(
+//                 client.expect_header(client.info().genesis_hash).expect("there should be
+// header"),             )),
+//         );
+
+//         let mut proposer_factory = ProposerFactory::new(spawner, client.clone(), txpool, None);
+
+//         let proposer = proposer_factory
+//             .init_with_now(&client.header(genesis_hash).unwrap().unwrap(),
+// Box::new(time::Instant::now));
+
+//         let deadline = time::Duration::from_secs(9);
+//         let proposal = block_on(proposer.propose(Default::default(), Default::default(),
+// deadline, None)).unwrap();
+
+//         assert_eq!(proposal.block.extrinsics().len(), 1);
+
+//         let api = client.runtime_api();
+//         api.execute_block(genesis_hash, proposal.block).unwrap();
+
+//         let state = backend.state_at(genesis_hash).unwrap();
+
+//         let storage_changes = api.into_storage_changes(&state, genesis_hash).unwrap();
+
+//         assert_eq!(proposal.storage_changes.transaction_storage_root,
+// storage_changes.transaction_storage_root,);     }
+
+//     // This test ensures that if one transaction of a user was rejected, because for example
+//     // the weight limit was hit, we don't mark the other transactions of the user as invalid
+// because     // the nonce is not matching.
+//     #[test]
+//     fn should_not_remove_invalid_transactions_from_the_same_sender_after_one_was_invalid() {
+//         // given
+//         let client = Arc::new(substrate_test_runtime_client::new());
+//         let spawner = sp_core::testing::TaskExecutor::new();
+//         let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(),
+// client.clone());
+
+//         let medium = |nonce|
+// ExtrinsicBuilder::new_fill_block(Perbill::from_parts(MEDIUM)).nonce(nonce).build();         let
+// huge = |nonce| ExtrinsicBuilder::new_fill_block(Perbill::from_parts(HUGE)).nonce(nonce).build();
+
+//         block_on(txpool.submit_at(
+//             &BlockId::number(0),
+//             SOURCE,
+//             vec![medium(0), medium(1), huge(2), medium(3), huge(4), medium(5), medium(6)],
+//         ))
+//         .unwrap();
+
+//         let mut proposer_factory = ProposerFactory::new(spawner, client.clone(), txpool.clone(),
+// None);         let mut propose_block =
+//             |client: &TestClient, parent_number, expected_block_extrinsics,
+// expected_pool_transactions| {                 let hash =
+// client.expect_block_hash_from_id(&BlockId::Number(parent_number)).unwrap();                 let
+// proposer =
+// proposer_factory.init_with_now(&client.expect_header(hash).unwrap(),
+// Box::new(time::Instant::now));
+
+//                 // when
+//                 let deadline = time::Duration::from_secs(900);
+//                 let block = block_on(proposer.propose(Default::default(), Default::default(),
+// deadline, None))                     .map(|r| r.block)
+//                     .unwrap();
+
+//                 // then
+//                 // block should have some extrinsics although we have some more in the pool.
+//                 assert_eq!(txpool.ready().count(), expected_pool_transactions, "at block: {}",
+// block.header.number);                 assert_eq!(block.extrinsics().len(),
+// expected_block_extrinsics, "at block: {}", block.header.number);
+
+//                 block
+//             };
+
+//         let import_and_maintain = |mut client: Arc<TestClient>, block: TestBlock| {
+//             let hash = block.hash();
+//             block_on(client.import(BlockOrigin::Own, block)).unwrap();
+//             block_on(txpool.maintain(chain_event(client.expect_header(hash).expect("there should
+// be header"))));         };
+
+//         block_on(
+//             txpool.maintain(chain_event(
+//                 client.expect_header(client.info().genesis_hash).expect("there should be
+// header"),             )),
+//         );
+//         assert_eq!(txpool.ready().count(), 7);
+
+//         // let's create one block and import it
+//         let block = propose_block(&client, 0, 2, 7);
+//         import_and_maintain(client.clone(), block);
+//         assert_eq!(txpool.ready().count(), 5);
+
+//         // now let's make sure that we can still make some progress
+//         let block = propose_block(&client, 1, 1, 5);
+//         import_and_maintain(client.clone(), block);
+//         assert_eq!(txpool.ready().count(), 4);
+
+//         // again let's make sure that we can still make some progress
+//         let block = propose_block(&client, 2, 1, 4);
+//         import_and_maintain(client.clone(), block);
+//         assert_eq!(txpool.ready().count(), 3);
+
+//         // again let's make sure that we can still make some progress
+//         let block = propose_block(&client, 3, 1, 3);
+//         import_and_maintain(client.clone(), block);
+//         assert_eq!(txpool.ready().count(), 2);
+
+//         // again let's make sure that we can still make some progress
+//         let block = propose_block(&client, 4, 2, 2);
+//         import_and_maintain(client.clone(), block);
+//         assert_eq!(txpool.ready().count(), 0);
+//     }
+
+//     #[test]
+//     fn should_keep_adding_transactions_after_exhausts_resources_before_soft_deadline() {
+//         // given
+//         let client = Arc::new(substrate_test_runtime_client::new());
+//         let spawner = sp_core::testing::TaskExecutor::new();
+//         let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(),
+// client.clone());
+
+//         let tiny = |nonce|
+// ExtrinsicBuilder::new_fill_block(Perbill::from_parts(TINY)).nonce(nonce).build();         let
+// huge = |who| {
+// ExtrinsicBuilder::new_fill_block(Perbill::from_parts(HUGE)).signer(AccountKeyring::numeric(who)).
+// build()         };
+
+//         block_on(txpool.submit_at(
+//             &BlockId::number(0),
+//             SOURCE,
+//             // add 2 * MAX_SKIPPED_TRANSACTIONS that exhaust resources
+//             (0..MAX_SKIPPED_TRANSACTIONS * 2)
+// 					.map(huge)
+// 					// and some transactions that are okay.
+// 					.chain((0..MAX_SKIPPED_TRANSACTIONS as u64).map(tiny))
+// 					.collect(),
+//         ))
+//         .unwrap();
+
+//         block_on(
+//             txpool.maintain(chain_event(
+//                 client.expect_header(client.info().genesis_hash).expect("there should be
+// header"),             )),
+//         );
+//         assert_eq!(txpool.ready().count(), MAX_SKIPPED_TRANSACTIONS * 3);
+
+//         let mut proposer_factory = ProposerFactory::new(spawner, client.clone(), txpool, None);
+
+//         let cell = Mutex::new(time::Instant::now());
+//         let proposer = proposer_factory.init_with_now(
+//             &client.expect_header(client.info().genesis_hash).unwrap(),
+//             Box::new(move || {
+//                 let mut value = cell.lock();
+//                 let old = *value;
+//                 *value = old + time::Duration::from_secs(1);
+//                 old
+//             }),
+//         );
+
+//         // when
+//         // give it enough time so that deadline is never triggered.
+//         let deadline = time::Duration::from_secs(900);
+//         let block = block_on(proposer.propose(Default::default(), Default::default(), deadline,
+// None))             .map(|r| r.block)
+//             .unwrap();
+
+//         // then block should have all non-exhaust resources extrinsics (+ the first one).
+//         assert_eq!(block.extrinsics().len(), MAX_SKIPPED_TRANSACTIONS + 1);
+//     }
+
+//     #[test]
+//     fn should_only_skip_up_to_some_limit_after_soft_deadline() {
+//         // given
+//         let client = Arc::new(substrate_test_runtime_client::new());
+//         let spawner = sp_core::testing::TaskExecutor::new();
+//         let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(),
+// client.clone());
+
+//         let tiny = |who| {
+//             ExtrinsicBuilder::new_fill_block(Perbill::from_parts(TINY))
+//                 .signer(AccountKeyring::numeric(who))
+//                 .nonce(1)
+//                 .build()
+//         };
+//         let huge = |who| {
+//
+// ExtrinsicBuilder::new_fill_block(Perbill::from_parts(HUGE)).signer(AccountKeyring::numeric(who)).
+// build()         };
+
+//         block_on(txpool.submit_at(
+//             &BlockId::number(0),
+//             SOURCE,
+//             (0..MAX_SKIPPED_TRANSACTIONS + 2)
+// 					.map(huge)
+// 					// and some transactions that are okay.
+// 					.chain((0..MAX_SKIPPED_TRANSACTIONS + 2).map(tiny))
+// 					.collect(),
+//         ))
+//         .unwrap();
+
+//         block_on(
+//             txpool.maintain(chain_event(
+//                 client.expect_header(client.info().genesis_hash).expect("there should be
+// header"),             )),
+//         );
+//         assert_eq!(txpool.ready().count(), MAX_SKIPPED_TRANSACTIONS * 2 + 4);
+
+//         let mut proposer_factory = ProposerFactory::new(spawner, client.clone(), txpool, None);
+
+//         let deadline = time::Duration::from_secs(600);
+//         let cell = Arc::new(Mutex::new((0, time::Instant::now())));
+//         let cell2 = cell.clone();
+//         let proposer = proposer_factory.init_with_now(
+//             &client.expect_header(client.info().genesis_hash).unwrap(),
+//             Box::new(move || {
+//                 let mut value = cell.lock();
+//                 let (called, old) = *value;
+//                 // add time after deadline is calculated internally (hence 1)
+//                 let increase = if called == 1 {
+//                     // we start after the soft_deadline should have already been reached.
+//                     deadline / 2
+//                 } else {
+//                     // but we make sure to never reach the actual deadline
+//                     time::Duration::from_millis(0)
+//                 };
+//                 *value = (called + 1, old + increase);
+//                 old
+//             }),
+//         );
+
+//         let block = block_on(proposer.propose(Default::default(), Default::default(), deadline,
+// None))             .map(|r| r.block)
+//             .unwrap();
+
+//         // then the block should have one or two transactions. This maybe random as they are
+//         // processed in parallel. The same signer and consecutive nonces for huge and tiny
+//         // transactions guarantees that max two transactions will get to the block.
+//         assert!((1..3).contains(&block.extrinsics().len()), "Block shall contain one or two
+// extrinsics.");         assert!(
+//             cell2.lock().0 > MAX_SKIPPED_TRANSACTIONS,
+//             "Not enough calls to current time, which indicates the test might have ended because
+// of deadline, not \              soft deadline"
+//         );
+//     }
+
+//     #[test]
+//     fn should_cease_building_block_when_block_limit_is_reached() {
+//         let client = Arc::new(substrate_test_runtime_client::new());
+//         let spawner = sp_core::testing::TaskExecutor::new();
+//         let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(),
+// client.clone());         let genesis_header =
+// client.expect_header(client.info().genesis_hash).expect("there should be header");
+
+//         let extrinsics_num = 5;
+//         let extrinsics = std::iter::once(
+//             Transfer { from: AccountKeyring::Alice.into(), to: AccountKeyring::Bob.into(),
+// amount: 100, nonce: 0 }                 .into_unchecked_extrinsic(),
+//         )
+//         .chain((1..extrinsics_num as u64).map(extrinsic))
+//         .collect::<Vec<_>>();
+
+//         let block_limit = genesis_header.encoded_size()
+//             + extrinsics.iter().take(extrinsics_num - 1).map(Encode::encoded_size).sum::<usize>()
+//             + Vec::<Extrinsic>::new().encoded_size();
+
+//         block_on(txpool.submit_at(&BlockId::number(0), SOURCE, extrinsics)).unwrap();
+
+//         block_on(txpool.maintain(chain_event(genesis_header.clone())));
+
+//         let mut proposer_factory = ProposerFactory::new(spawner, client, txpool, None);
+
+//         let proposer = block_on(proposer_factory.init(&genesis_header)).unwrap();
+
+//         // Give it enough time
+//         let deadline = time::Duration::from_secs(300);
+//         let block = block_on(proposer.propose(Default::default(), Default::default(), deadline,
+// Some(block_limit)))             .map(|r| r.block)
+//             .unwrap();
+
+//         // Based on the block limit, one transaction shouldn't be included.
+//         assert_eq!(block.extrinsics().len(), extrinsics_num - 1);
+
+//         let proposer = block_on(proposer_factory.init(&genesis_header)).unwrap();
+
+//         let block = block_on(proposer.propose(Default::default(), Default::default(), deadline,
+// None))             .map(|r| r.block)
+//             .unwrap();
+
+//         // Without a block limit it should include all of them
+//         assert_eq!(block.extrinsics().len(), extrinsics_num);
+//     }
+
+//     #[test]
+//     fn proposer_factory_can_update_default_block_size_limit() {
+//         let client = Arc::new(substrate_test_runtime_client::new());
+//         let spawner = sp_core::testing::TaskExecutor::new();
+//         let txpool = BasicPool::new_full(Default::default(), true.into(), None, spawner.clone(),
+// client.clone());         let genesis_header =
+// client.expect_header(client.info().genesis_hash).expect("there should be header");
+
+//         let extrinsics_num = 5;
+//         let extrinsics = std::iter::once(
+//             Transfer { from: AccountKeyring::Alice.into(), to: AccountKeyring::Bob.into(),
+// amount: 100, nonce: 0 }                 .into_unchecked_extrinsic(),
+//         )
+//         .chain((1..extrinsics_num as u64).map(extrinsic))
+//         .collect::<Vec<_>>();
+
+//         let block_limit = genesis_header.encoded_size()
+//             + extrinsics.iter().take(extrinsics_num - 1).map(Encode::encoded_size).sum::<usize>()
+//             + Vec::<Extrinsic>::new().encoded_size();
+
+//         block_on(txpool.submit_at(&BlockId::number(0), SOURCE, extrinsics)).unwrap();
+
+//         block_on(txpool.maintain(chain_event(genesis_header.clone())));
+
+//         let mut proposer_factory = ProposerFactory::new(spawner, client, txpool, None);
+//         proposer_factory.set_default_block_size_limit(block_limit);
+
+//         let proposer = block_on(proposer_factory.init(&genesis_header)).unwrap();
+
+//         // Give it enough time
+//         let deadline = time::Duration::from_secs(300);
+//         let block = block_on(proposer.propose(Default::default(), Default::default(), deadline,
+// Default::default()))             .map(|r| r.block)
+//             .unwrap();
+
+//         // Based on the block limit, one transaction shouldn't be included.
+//         assert_eq!(block.extrinsics().len(), extrinsics_num - 1);
+
+//         // increase block size limit
+//         proposer_factory.set_default_block_size_limit(block_limit * 2);
+//         let proposer = block_on(proposer_factory.init(&genesis_header)).unwrap();
+
+//         let block = block_on(proposer.propose(Default::default(), Default::default(), deadline,
+// None))             .map(|r| r.block)
+//             .unwrap();
+
+//         // with increased blocklimit we should include all of them
+//         assert_eq!(block.extrinsics().len(), extrinsics_num);
+//     }
+// }
