@@ -32,10 +32,12 @@ sp-consensus = { workspace = true }
 sp-core = { workspace = true }
 sp-inherents = { workspace = true }
 sp-runtime = { workspace = true }
+starknet-core = { workspace = true }
 parking_lot = { workspace = true }
 mc-transaction-pool = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
+serde_derive = "1.0.190"
 pallet-starknet = { workspace = true, default-features = true }
 mc-rpc = { workspace = true }
 mp-starknet = { workspace = true }
