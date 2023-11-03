@@ -39,7 +39,8 @@ use sp_inherents::InherentData;
 use sp_runtime::generic::BlockId as SPBlockId;
 use sp_runtime::traits::{Block as BlockT, Header as HeaderT};
 use sp_runtime::{Digest, Percent, SaturatedConversion};
-use tokio;
+use starknet_core::types::{BroadcastedInvokeTransaction, BroadcastedInvokeTransactionV1, FieldElement};
+use {serde_derive, tokio};
 
 #[derive(Serialize)]
 struct JsonRequest {
@@ -53,6 +54,28 @@ struct JsonRequest {
 struct JsonResponse {
     result: Value,
     id: i32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BroadcastedInvokeTransactionV360 {
+    /// The maximal fee that can be charged for including the transaction
+    // #[serde(rename = "type")]
+    // pub kind: String,
+    // pub version: FieldElement,
+    pub max_fee: FieldElement,
+    /// Signature
+    pub signature: Vec<FieldElement>,
+    /// Nonce
+    pub nonce: FieldElement,
+    pub sender_address: FieldElement,
+    /// The data expected by the account's `execute` function (in most usecases, this includes the
+    /// called contract address and a function selector)
+    pub calldata: Vec<FieldElement>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ABCD {
+    pub invoke_transaction: BroadcastedInvokeTransactionV360,
 }
 
 /// Default block size limit in bytes used by [`Proposer`].
@@ -421,58 +444,102 @@ where
         // let epool = self.transaction_pool.encrypted_pool().clone();
         let block_height = self.parent_number.to_string().parse::<u64>().unwrap() + 1;
 
-        let client = Client::new();
+        // let client = Client::new();
 
-        // prepare JSON-RPC request
-        let request = JsonRequest {
-            jsonrpc: "2.0",
-            method: "IsLeader",
-            params: vec![json!({"rollup_id":1, "block_height":block_height})],
-            id: 1,
+        // // prepare JSON-RPC request
+        // let request = JsonRequest {
+        //     jsonrpc: "2.0",
+        //     method: "IsLeader",
+        //     params: vec![json!({"rollup_id":1, "block_height":block_height})],
+        //     id: 1,
+        // };
+
+        // // set server uri
+        // let uri = Uri::from_static("http://127.0.0.1:8083");
+
+        // // create JSON-RPC request
+        // let request = Request::post(uri)
+        //     .header("content-type", "application/json")
+        //     .body(Body::from(serde_json::to_string(&request).unwrap()))
+        //     .unwrap();
+
+        // // send request, receive response
+        // let response = client.request(request).await.unwrap();
+        // let response_body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+
+        // // parse response to JSON
+        // let response: JsonResponse = serde_json::from_slice(&response_body).unwrap();
+
+        // // print result
+        // println!("JSON-RPC response: {:?}", response.result);
+
+        // deserialize test
+        let serialized_tx = r#"
+        {
+            "invoke_transaction":
+            {
+                "type": "INVOKE",
+                "max_fee": "0xDEADB",
+                "version": "0x1",
+                "nonce": "0x0",
+                "signature": ["0x0", "0x0"],
+                "sender_address": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "calldata": [
+                    "0x0000000000000000000000000000000000000000000000000000000000001111",
+                    "0x36fa6de2810d05c3e1a0ebe23f60b9c2f4629bbead09e5a9704e1c5632630d5",
+                    "0x0"
+                ]
+            }
+        }"#;
+
+        let a = serde_json::from_str::<ABCD>(serialized_tx).unwrap();
+        let b = BroadcastedInvokeTransactionV1 {
+            max_fee: a.invoke_transaction.max_fee,
+            signature: a.invoke_transaction.signature,
+            nonce: a.invoke_transaction.nonce,
+            sender_address: a.invoke_transaction.sender_address,
+            calldata: a.invoke_transaction.calldata,
+            is_query: false,
         };
+        let c: BroadcastedInvokeTransaction = BroadcastedInvokeTransaction::V1(b);
 
-        // set server uri
-        let uri = Uri::from_static("http://127.0.0.1:8083");
+        let order = 0;
 
-        // create JSON-RPC request
-        let request = Request::post(uri)
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&request).unwrap()))
+        let best_block_hash = self.client.info().best_hash;
+        let invoke_tx = InvokeTransaction::try_from(c)
+            .map_err(|e| {
+                error!("{e}");
+            })
             .unwrap();
+        let chain_id = Felt252Wrapper(self.client.runtime_api().chain_id(best_block_hash).unwrap().into());
 
-        // send request, receive response
-        let response = client.request(request).await.unwrap();
-        let response_body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        // let chain_id = Felt252Wrapper(self.chain_id()?.0);
 
-        // parse response to JSON
-        let response: JsonResponse = serde_json::from_slice(&response_body).unwrap();
+        let transaction: MPTransaction = invoke_tx.from_invoke(chain_id);
 
-        // print result
-        println!("JSON-RPC response: {:?}", response.result);
+        // let extrinsic =
+        //     convert_transaction(self.client.clone(), best_block_hash, transaction.clone(),
+        // TxType::Invoke).await?;
 
-        // TODO: deserialize string to Madara Extrinsic Type
-        //////////////////////////////////////////////////////////////////////////
-        // let best_block_hash = self.client.info().best_hash;
-        // let pool = self.transaction_pool.clone();
-
-        // let a = Block::Extrinsic {};
-        // let b = Block::Extrinsic {};
-
-        // let sample = vec![(a, 0), (b, 1)];
-
-        // for (extrinsic, order) in sample {
-        //     submit_extrinsic_with_order(pool, best_block_hash, extrinsic, order)
-        //         .await
-        //         .expect("Failed to submit extrinsic");
-        // }
-        //////////////////////////////////////////////////////////////////////////
+        let extrinsic = self
+            .client
+            .runtime_api()
+            .convert_transaction(best_block_hash, transaction, TxType::Invoke)
+            .expect("convert_transaction")
+            .expect("runtime_api");
+        let _ = self
+            .transaction_pool
+            .clone()
+            .submit_one_with_order(&SPBlockId::hash(best_block_hash), TransactionSource::External, extrinsic, order)
+            .await;
 
         // let tx_cnt = response.result.len();
-        // let ready_cnt = self.transaction_pool.status().ready as u64;
-        // println!("{} waiting {}:{}", block_height, tx_cnt, ready_cnt);
-        // if tx_cnt != ready_cnt {
-        //     return Err(sp_blockchain::Error::TransactionPoolNotReady);
-        // }
+        let tx_cnt = 1;
+        let ready_cnt = self.transaction_pool.status().ready as u64;
+        println!("{} waiting {}:{}", block_height, tx_cnt, ready_cnt);
+        if tx_cnt != ready_cnt {
+            return Err(sp_blockchain::Error::TransactionPoolNotReady);
+        }
 
         // let enabled = {
         //     let lock = epool.lock().await;
